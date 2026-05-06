@@ -538,22 +538,54 @@ async function loadAllData(uid){
   }
 }
 async function dbAddTx(tx){
-  const{data,error}=await SB.from('transactions').insert({user_id:USER.id,...tx}).select().single();
-  if(!error&&data){
-    txns.unshift({...data,amount:parseFloat(data.amount)});
+  // Optimistic: add locally with a temp id immediately
+  const tempId='tmp-'+Date.now();
+  const localTx={...tx,id:tempId,user_id:USER.id,amount:parseFloat(tx.amount)};
+  txns.unshift(localTx);
+  saveCache(USER.id);
+  // Then persist to Supabase
+  try{
+    const timeout=new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),8000));
+    const insert=SB.from('transactions').insert({user_id:USER.id,...tx}).select().single();
+    const{data,error}=await Promise.race([insert,timeout]);
+    if(error)throw error;
+    // Replace temp record with real one from server
+    const idx=txns.findIndex(t=>t.id===tempId);
+    if(idx>=0)txns[idx]={...data,amount:parseFloat(data.amount)};
     saveCache(USER.id);
+  }catch(e){
+    console.warn('Supabase add failed, kept locally:',e.message);
+    // Temp record stays — will sync on next background refresh
   }
 }
 async function dbDeleteTx(id){
-  await SB.from('transactions').delete().eq('id',id).eq('user_id',USER.id);
+  // Remove locally immediately
   txns=txns.filter(t=>t.id!==id);
   saveCache(USER.id);
+  // Then delete from Supabase
+  try{
+    const timeout=new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),8000));
+    const del=SB.from('transactions').delete().eq('id',id).eq('user_id',USER.id);
+    await Promise.race([del,timeout]);
+  }catch(e){
+    console.warn('Supabase delete failed:',e.message);
+  }
 }
 async function dbSaveBals(ym,bals){
-  const rows=Object.entries(bals).map(([payment,amount])=>({user_id:USER.id,month:ym,payment,amount}));
-  await SB.from('starting_balances').upsert(rows,{onConflict:'user_id,month,payment'});
+  // Always update local state and cache immediately
   startBals[ym]=bals;
   saveCache(USER.id);
+  // Then try to sync to Supabase with a timeout
+  try{
+    const rows=Object.entries(bals).map(([payment,amount])=>({user_id:USER.id,month:ym,payment,amount}));
+    const timeout=new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),8000));
+    const upsert=SB.from('starting_balances').upsert(rows,{onConflict:'user_id,month,payment'});
+    const{error}=await Promise.race([upsert,timeout]);
+    if(error)throw error;
+  }catch(e){
+    console.warn('Supabase save failed, data kept locally:',e.message);
+    // Data is safe in cache — will retry on next full sync
+  }
 }
 
 // ── UI ────────────────────────────────────────────────────────────────────────
@@ -715,11 +747,15 @@ function updateBalTotal(){
   const el=document.getElementById('bal-total-preview');if(el)el.textContent=fmtUZS(t);
 }
 async function saveBalances(){
-  const btn=document.getElementById('save-bal-btn');btn.disabled=true;btn.textContent='Saving…';
-  const bals={};PAYMENTS.forEach(p=>{const el=document.getElementById('sb-'+p.id);bals[p.id]=parseFloat(el?el.value:0)||0});
+  const btn=document.getElementById('save-bal-btn');
+  btn.disabled=true;btn.textContent='Saving…';
+  const bals={};
+  PAYMENTS.forEach(p=>{const el=document.getElementById('sb-'+p.id);bals[p.id]=parseFloat(el?el.value:0)||0});
+  // dbSaveBals is now local-first, so this returns fast
   await dbSaveBals(viewMonth,bals);
   btn.disabled=false;btn.textContent='Save Balances';
-  renderTab();showToast('✓ Balances saved');
+  renderTab();
+  showToast('✓ Balances saved');
 }
 
 // ── Calendar ──────────────────────────────────────────────────────────────────
