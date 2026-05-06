@@ -429,15 +429,26 @@ let histPayFilter='all', statsPayFilter='all';
 let modalType='expense', modalPayment='card-4168', modalDate=null;
 let authMode='signin';
 
-function todayStr(){return new Date().toISOString().slice(0,10)}
-function todayMonth(){return new Date().toISOString().slice(0,7)}
+function pad2(n){return String(n).padStart(2,'0')}
+function toYmdLocal(d){return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`}
+function toYmLocal(d){return `${d.getFullYear()}-${pad2(d.getMonth()+1)}`}
+function todayStr(){return toYmdLocal(new Date())}
+function todayMonth(){return toYmLocal(new Date())}
 function fmt(n){return Math.abs(Math.round(n)).toLocaleString('ru-RU').replace(/,/g,' ')}
 function fmtUZS(n){return fmt(n)+' UZS'}
 function monthLabel(ym){const[y,m]=ym.split('-');return new Date(+y,+m-1,1).toLocaleString('en',{month:'short',year:'numeric'}).toUpperCase()}
 function dayLabel(d){return new Date(d+'T12:00').toLocaleDateString('en',{weekday:'long',month:'long',day:'numeric'})}
 function dayShort(d){return new Date(d+'T12:00').toLocaleDateString('en',{weekday:'short',month:'short',day:'numeric'})}
-function prevMonth(ym){const[y,m]=ym.split('-').map(Number);return new Date(y,m-2,1).toISOString().slice(0,7)}
-function nextMonth(ym){const[y,m]=ym.split('-').map(Number);return new Date(y,m,1).toISOString().slice(0,7)}
+function prevMonth(ym){
+  const [y,m]=ym.split('-').map(Number);
+  const d=new Date(y,m-2,1);
+  return toYmLocal(d);
+}
+function nextMonth(ym){
+  const [y,m]=ym.split('-').map(Number);
+  const d=new Date(y,m,1);
+  return toYmLocal(d);
+}
 
 function getStartBals(ym){
   const sb=startBals[ym];
