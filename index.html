@@ -512,13 +512,26 @@ async function handleAuth(){
   }
 }
 async function signOut(){
+  stopSyncFallback();
   if(realtimeChannel){ SB.removeChannel(realtimeChannel); realtimeChannel=null; }
-  await SB.auth.signOut();
+  // Update UI immediately so sign out never feels "stuck" on slow networks.
+  const prevUser=USER;
   USER=null;txns=[];startBals={};
   document.getElementById('main-app').style.display='none';
   document.getElementById('bottom-nav').style.display='none';
   document.getElementById('fab').style.display='none';
   document.getElementById('auth-screen').style.display='flex';
+  try{
+    await Promise.race([
+      SB.auth.signOut(),
+      new Promise((_,rej)=>setTimeout(()=>rej(new Error('Sign out timeout')),4000))
+    ]);
+  }catch(e){
+    console.warn('Sign out network issue:',e?.message||e);
+    showToast('Signed out locally. Network logout will retry.');
+    // Keep local UI signed out; if Supabase session still exists, auth listener can restore.
+    if(prevUser && !USER){ /* intentional no-op */ }
+  }
 }
 
 // ── Local cache ───────────────────────────────────────────────────────────────
@@ -587,6 +600,7 @@ function dbSaveBals(ym,bals){
 
 // ── Realtime sync ─────────────────────────────────────────────────────────────
 let realtimeChannel = null;
+let syncPollTimer = null;
 
 function startRealtimeSync(){
   if(realtimeChannel){ SB.removeChannel(realtimeChannel); realtimeChannel=null; }
@@ -616,6 +630,34 @@ function startRealtimeSync(){
     .subscribe((status, err)=>{
       console.log('Realtime status:', status, err||'');
     });
+}
+
+async function refreshFromServerSilent(){
+  if(!USER) return;
+  try{
+    await loadAllData(USER.id);
+    renderTab();
+  }catch(e){
+    console.warn('Periodic sync failed:', e?.message||e);
+  }
+}
+
+function startSyncFallback(){
+  stopSyncFallback();
+  // Poll as a safety net in case Realtime is disabled/throttled on some devices.
+  syncPollTimer=setInterval(refreshFromServerSilent, 12000);
+  document.addEventListener('visibilitychange', handleVisibilitySync);
+  window.addEventListener('focus', refreshFromServerSilent);
+}
+
+function stopSyncFallback(){
+  if(syncPollTimer){clearInterval(syncPollTimer);syncPollTimer=null;}
+  document.removeEventListener('visibilitychange', handleVisibilitySync);
+  window.removeEventListener('focus', refreshFromServerSilent);
+}
+
+function handleVisibilitySync(){
+  if(document.visibilityState==='visible') refreshFromServerSilent();
 }
 
 function handleRealtimeTx(payload){
@@ -674,6 +716,7 @@ function showApp(){
   document.getElementById('fab').style.display='flex';
   renderTab();
   startRealtimeSync(); // subscribe to live changes from other devices
+  startSyncFallback(); // safety-net sync for mobile/background scenarios
 }
 function switchTab(tab){
   activeTab=tab;
