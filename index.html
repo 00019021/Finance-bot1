@@ -396,8 +396,8 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:'DM San
 
 <script>
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
-const SUPABASE_URL      = 'https://omlatcmjgwvpycksqkai.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9tbGF0Y21qZ3d2cHlja3Nxa2FpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgwMDIwNzksImV4cCI6MjA5MzU3ODA3OX0.xhfFN_OoflQWQpGORehWgYJGYPb5dgECUbeTQ_Mmsyg';
+const SUPABASE_URL      = 'YOUR_SUPABASE_URL';
+const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
 // ─────────────────────────────────────────────────────────────────────────────
 
 // SB client is initialised at boot (see bottom of script)
@@ -578,61 +578,75 @@ function dbSaveBals(ym,bals){
 let realtimeChannel = null;
 
 function startRealtimeSync(){
-  if(realtimeChannel) SB.removeChannel(realtimeChannel);
+  if(realtimeChannel){ SB.removeChannel(realtimeChannel); realtimeChannel=null; }
 
   realtimeChannel = SB
-    .channel('db-changes')
+    .channel('finance-sync-'+USER.id)
     .on('postgres_changes',
-      {event:'*', schema:'public', table:'transactions', filter:'user_id=eq.'+USER.id},
-      (payload) => {
-        handleRealtimeTx(payload);
-      }
+      {event:'INSERT', schema:'public', table:'transactions'},
+      (payload) => { if(payload.new?.user_id===USER.id) handleRealtimeTx(payload); }
     )
     .on('postgres_changes',
-      {event:'*', schema:'public', table:'starting_balances', filter:'user_id=eq.'+USER.id},
-      (payload) => {
-        handleRealtimeBal(payload);
-      }
+      {event:'UPDATE', schema:'public', table:'transactions'},
+      (payload) => { if(payload.new?.user_id===USER.id) handleRealtimeTx(payload); }
     )
-    .subscribe((status)=>{
-      if(status==='SUBSCRIBED') console.log('Realtime connected ✓');
+    .on('postgres_changes',
+      {event:'DELETE', schema:'public', table:'transactions'},
+      (payload) => { handleRealtimeTx(payload); } // old row may not have user_id in delete
+    )
+    .on('postgres_changes',
+      {event:'INSERT', schema:'public', table:'starting_balances'},
+      (payload) => { if(payload.new?.user_id===USER.id) handleRealtimeBal(payload); }
+    )
+    .on('postgres_changes',
+      {event:'UPDATE', schema:'public', table:'starting_balances'},
+      (payload) => { if(payload.new?.user_id===USER.id) handleRealtimeBal(payload); }
+    )
+    .subscribe((status, err)=>{
+      console.log('Realtime status:', status, err||'');
     });
 }
 
 function handleRealtimeTx(payload){
   const {eventType, new: row, old: oldRow} = payload;
-  // Skip if this change came from this same tab (already applied locally)
-  if(eventType==='INSERT'){
-    const exists = txns.some(t => t.id === row.id);
-    if(!exists){
+
+  if(eventType==='INSERT' && row){
+    // Check if we already have it (added by this device with a temp id)
+    const tempIdx = txns.findIndex(t => t.id && t.id.startsWith('tmp-'));
+    if(tempIdx>=0){
+      // Replace the temp record with the real server one
+      txns[tempIdx] = {...row, amount:parseFloat(row.amount)};
+    } else if(!txns.some(t => t.id === row.id)){
+      // New record from another device — add it
       txns.unshift({...row, amount:parseFloat(row.amount)});
+    }
+    saveCache(USER.id);
+    renderTab();
+
+  } else if(eventType==='DELETE'){
+    const delId = (oldRow && oldRow.id) || (row && row.id);
+    if(delId){
+      const before = txns.length;
+      txns = txns.filter(t => t.id !== delId);
+      if(txns.length !== before){ saveCache(USER.id); renderTab(); }
+    }
+
+  } else if(eventType==='UPDATE' && row){
+    const idx = txns.findIndex(t => t.id === row.id);
+    if(idx>=0){
+      txns[idx] = {...row, amount:parseFloat(row.amount)};
       saveCache(USER.id);
       renderTab();
-    } else {
-      // Replace temp record (from this device) with real server record
-      const idx = txns.findIndex(t => t.id === row.id || t.id.startsWith('tmp-'));
-      if(idx>=0 && txns[idx].id !== row.id){
-        txns[idx] = {...row, amount:parseFloat(row.amount)};
-        saveCache(USER.id);
-      }
     }
-  } else if(eventType==='DELETE'){
-    const before = txns.length;
-    txns = txns.filter(t => t.id !== oldRow.id);
-    if(txns.length !== before){ saveCache(USER.id); renderTab(); }
-  } else if(eventType==='UPDATE'){
-    const idx = txns.findIndex(t => t.id === row.id);
-    if(idx>=0){ txns[idx]={...row,amount:parseFloat(row.amount)}; saveCache(USER.id); renderTab(); }
   }
 }
 
 function handleRealtimeBal(payload){
   const {eventType, new: row} = payload;
-  if(eventType==='INSERT'||eventType==='UPDATE'){
+  if((eventType==='INSERT'||eventType==='UPDATE') && row){
     if(!startBals[row.month]) startBals[row.month]={};
-    const current = startBals[row.month][row.payment];
     const incoming = parseFloat(row.amount);
-    if(current !== incoming){
+    if(startBals[row.month][row.payment] !== incoming){
       startBals[row.month][row.payment] = incoming;
       saveCache(USER.id);
       renderTab();
@@ -683,7 +697,7 @@ function monthNavHTML(tab){
   return`<div class="month-nav">
     <button class="month-nav-btn" onclick="changeMonth(-1,'${tab}')">‹</button>
     <div class="month-nav-lbl">${monthLabel(viewMonth)}</div>
-    <button class="month-nav-btn" onclick="changeMonth(1,'${tab}')" ${viewMonth>=todayMonth()?'disabled':''}>›</button>
+    <button class="month-nav-btn" onclick="changeMonth(1,'${tab}')">›</button>
   </div>`;
 }
 
