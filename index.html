@@ -329,6 +329,14 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:'DM San
       <div class="form-row"><label>Password</label><input type="password" id="auth-password" placeholder="••••••••" autocomplete="current-password"></div>
       <button class="auth-submit" id="auth-submit" onclick="handleAuth()">Sign In</button>
       <div class="auth-error" id="auth-error"></div>
+      <div id="auth-hint" style="font-size:11px;color:var(--text3);text-align:center;margin-top:14px;line-height:1.6;padding-top:14px;border-top:.5px solid var(--border)">
+        First time? <strong style="color:var(--text2)">Sign Up</strong> above.<br>
+        <span id="signup-hint" style="display:none">
+          Tip: To skip email confirmation, go to<br>
+          <strong style="color:var(--gold)">Supabase → Authentication → Providers → Email</strong><br>
+          and turn off <em>"Confirm email"</em>.
+        </span>
+      </div>
     </div>
   </div>
 </div>
@@ -388,13 +396,11 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:'DM San
 
 <script>
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
-const SUPABASE_URL      = 'https://omlatcmjgwvpycksqkai.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9tbGF0Y21qZ3d2cHlja3Nxa2FpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgwMDIwNzksImV4cCI6MjA5MzU3ODA3OX0.xhfFN_OoflQWQpGORehWgYJGYPb5dgECUbeTQ_Mmsyg';
+const SUPABASE_URL      = 'YOUR_SUPABASE_URL';
+const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
 // ─────────────────────────────────────────────────────────────────────────────
 
-const _initUrl = SUPABASE_URL !== 'YOUR_SUPABASE_URL' ? SUPABASE_URL : (localStorage.getItem('fz-sb-url') || 'https://placeholder.supabase.co');
-const _initKey = SUPABASE_ANON_KEY !== 'YOUR_SUPABASE_ANON_KEY' ? SUPABASE_ANON_KEY : (localStorage.getItem('fz-sb-key') || 'eyJplaceholderplaceholderplaceholderplaceholderxx');
-let sb = supabase.createClient(_initUrl, _initKey);
+// SB client is initialised at boot (see bottom of script)
 
 const PAYMENTS=[
   {id:'card-4168',label:'·· 4168',icon:'💳',chip:'#5A91D4',chipBg:'rgba(90,145,212,.15)',color:'#5A91D4'},
@@ -456,6 +462,8 @@ function showAuthTab(mode){
   document.getElementById('tab-signup').className='auth-tab'+(mode==='signup'?' active':'');
   document.getElementById('auth-submit').textContent=mode==='signin'?'Sign In':'Create Account';
   document.getElementById('auth-error').textContent='';
+  const hint=document.getElementById('signup-hint');
+  if(hint)hint.style.display=mode==='signup'?'inline':' none';
 }
 async function handleAuth(){
   const email=document.getElementById('auth-email').value.trim();
@@ -463,38 +471,89 @@ async function handleAuth(){
   const btn=document.getElementById('auth-submit');
   const errEl=document.getElementById('auth-error');
   if(!email||!pw){errEl.textContent='Please fill in all fields.';return}
-  btn.disabled=true;btn.textContent=authMode==='signin'?'Signing in…':'Creating account…';
+  if(pw.length<6){errEl.textContent='Password must be at least 6 characters.';return}
+  btn.disabled=true;
+  btn.textContent=authMode==='signin'?'Signing in…':'Creating account…';
+  errEl.style.color='var(--red-text)';
   errEl.textContent='';
-  const{error}=authMode==='signin'?await sb.auth.signInWithPassword({email,password:pw}):await sb.auth.signUp({email,password:pw});
-  if(error){errEl.textContent=error.message;btn.disabled=false;btn.textContent=authMode==='signin'?'Sign In':'Create Account'}
+  if(authMode==='signin'){
+    const{error}=await SB.auth.signInWithPassword({email,password:pw});
+    if(error){
+      errEl.textContent=error.message==='Invalid login credentials'?'Wrong email or password.':error.message;
+      btn.disabled=false;btn.textContent='Sign In';
+    }
+  } else {
+    const{data,error}=await SB.auth.signUp({email,password:pw});
+    if(error){
+      errEl.textContent=error.message;
+      btn.disabled=false;btn.textContent='Create Account';
+    } else if(data?.session){
+      // Email confirmation disabled — logged in immediately
+      // onAuthStateChange will handle the rest
+    } else {
+      // Email confirmation required
+      errEl.style.color='var(--green-text)';
+      errEl.textContent='✓ Check your email and click the confirmation link, then sign in.';
+      btn.disabled=false;btn.textContent='Create Account';
+      // Switch to sign in tab
+      setTimeout(()=>showAuthTab('signin'),2000);
+    }
+  }
 }
 async function signOut(){
-  await sb.auth.signOut();USER=null;txns=[];startBals={};
+  await SB.auth.signOut();USER=null;txns=[];startBals={};
   document.getElementById('main-app').style.display='none';
   document.getElementById('bottom-nav').style.display='none';
   document.getElementById('fab').style.display='none';
   document.getElementById('auth-screen').style.display='flex';
 }
 
+// ── Local cache ───────────────────────────────────────────────────────────────
+function cacheKey(uid){return 'fz-cache-'+uid}
+function saveCache(uid){
+  try{localStorage.setItem(cacheKey(uid),JSON.stringify({txns,startBals,ts:Date.now()}))}catch(e){}
+}
+function loadCache(uid){
+  try{
+    const raw=localStorage.getItem(cacheKey(uid));
+    if(!raw)return false;
+    const c=JSON.parse(raw);
+    txns=(c.txns||[]).map(r=>({...r,amount:parseFloat(r.amount)}));
+    startBals=c.startBals||{};
+    return true;
+  }catch(e){return false}
+}
+
 // ── Data ──────────────────────────────────────────────────────────────────────
-async function loadAllData(){
+async function loadAllData(uid){
   const[{data:txData},{data:balData}]=await Promise.all([
-    sb.from('transactions').select('*').eq('user_id',USER.id).order('date',{ascending:false}),
-    sb.from('starting_balances').select('*').eq('user_id',USER.id),
+    SB.from('transactions').select('*').eq('user_id',uid).order('date',{ascending:false}),
+    SB.from('starting_balances').select('*').eq('user_id',uid),
   ]);
-  txns=(txData||[]).map(r=>({...r,amount:parseFloat(r.amount)}));
-  startBals={};
-  (balData||[]).forEach(r=>{if(!startBals[r.month])startBals[r.month]={};startBals[r.month][r.payment]=parseFloat(r.amount)});
+  if(txData){
+    txns=txData.map(r=>({...r,amount:parseFloat(r.amount)}));
+    startBals={};
+    (balData||[]).forEach(r=>{if(!startBals[r.month])startBals[r.month]={};startBals[r.month][r.payment]=parseFloat(r.amount)});
+    saveCache(uid);
+  }
 }
 async function dbAddTx(tx){
-  const{data,error}=await sb.from('transactions').insert({user_id:USER.id,...tx}).select().single();
-  if(!error&&data)txns.unshift({...data,amount:parseFloat(data.amount)});
+  const{data,error}=await SB.from('transactions').insert({user_id:USER.id,...tx}).select().single();
+  if(!error&&data){
+    txns.unshift({...data,amount:parseFloat(data.amount)});
+    saveCache(USER.id);
+  }
 }
-async function dbDeleteTx(id){await sb.from('transactions').delete().eq('id',id).eq('user_id',USER.id);txns=txns.filter(t=>t.id!==id)}
+async function dbDeleteTx(id){
+  await SB.from('transactions').delete().eq('id',id).eq('user_id',USER.id);
+  txns=txns.filter(t=>t.id!==id);
+  saveCache(USER.id);
+}
 async function dbSaveBals(ym,bals){
   const rows=Object.entries(bals).map(([payment,amount])=>({user_id:USER.id,month:ym,payment,amount}));
-  await sb.from('starting_balances').upsert(rows,{onConflict:'user_id,month,payment'});
+  await SB.from('starting_balances').upsert(rows,{onConflict:'user_id,month,payment'});
   startBals[ym]=bals;
+  saveCache(USER.id);
 }
 
 // ── UI ────────────────────────────────────────────────────────────────────────
@@ -1137,63 +1196,76 @@ async function applySetup(){
     if(error)throw error;
     localStorage.setItem('fz-sb-url',url);
     localStorage.setItem('fz-sb-key',key);
-    errEl.textContent='';
-    document.getElementById('setup-screen').style.display='none';
-    // Reinitialise sb with real keys
-    const newClient = supabase.createClient(url, key);
-    Object.keys(newClient).forEach(k=>{ try{ sb[k]=newClient[k]; }catch(e){} });
-    sb.__proto__ = newClient.__proto__;
-    // Restart boot
-    bootWithClient(sb);
+    errEl.textContent='✓ Connected! Loading…';
+    errEl.style.color='var(--green-text)';
+    setTimeout(()=>location.reload(), 800);
   }catch(e){
     errEl.textContent='Connection failed — check your keys and try again.';
   }
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
-const KEYS_OK = SUPABASE_URL!=='YOUR_SUPABASE_URL' || (localStorage.getItem('fz-sb-url'));
+const _url = SUPABASE_URL !== 'YOUR_SUPABASE_URL' ? SUPABASE_URL : (localStorage.getItem('fz-sb-url') || '');
+const _key = SUPABASE_ANON_KEY !== 'YOUR_SUPABASE_ANON_KEY' ? SUPABASE_ANON_KEY : (localStorage.getItem('fz-sb-key') || '');
 
-// Use hardcoded keys if set, otherwise fall back to localStorage
-const _url = SUPABASE_URL!=='YOUR_SUPABASE_URL' ? SUPABASE_URL : (localStorage.getItem('fz-sb-url')||'');
-const _key = SUPABASE_ANON_KEY!=='YOUR_SUPABASE_ANON_KEY' ? SUPABASE_ANON_KEY : (localStorage.getItem('fz-sb-key')||'');
+// SB = single authoritative Supabase client used everywhere in the app
+let SB;
 
-if(!_url || !_key){
-  // Keys not configured — show setup immediately
-  document.getElementById('loading-screen').style.display='none';
+if (!_url || !_key) {
+  document.getElementById('loading-screen').style.display = 'none';
   showSetupScreen();
 } else {
-  // Re-init Supabase with the real keys (may differ from top-of-file placeholders)
-  const _sb = supabase.createClient(_url, _key);
-  Object.assign(sb, _sb); // swap internals
+  SB = supabase.createClient(_url, _key, {
+    auth: { persistSession: true, autoRefreshToken: true, storageKey: 'fz-auth' }
+  });
 
-  bootWithClient(sb);
-}
+  let booted = false;
 
-function bootWithClient(client){
-  // Safety net: if onAuthStateChange never fires within 8s, stop spinning
-  const bootTimeout=setTimeout(()=>{
-    if(document.getElementById('loading-screen').style.display!=='none'){
-      document.getElementById('loading-screen').style.display='none';
-      showSetupScreen();
+  // Safety net — if Supabase never responds within 5s, show auth screen
+  const bootTimeout = setTimeout(() => {
+    if (!booted) {
+      booted = true;
+      document.getElementById('loading-screen').style.display = 'none';
+      document.getElementById('auth-screen').style.display = 'flex';
     }
-  },8000);
+  }, 5000);
 
-  client.auth.onAuthStateChange(async(event,session)=>{
+  SB.auth.onAuthStateChange(async (event, session) => {
+    // Ignore token refresh events — they don't need a UI change
+    if (event === 'TOKEN_REFRESHED') return;
+
     clearTimeout(bootTimeout);
-    if(session?.user){
-      USER=session.user;
-      sb=client;
-      document.getElementById('loading-screen').style.display='flex';
-      document.getElementById('auth-screen').style.display='none';
-      document.getElementById('main-app').style.display='none';
-      try{await loadAllData();}catch(e){console.error('loadAllData error',e)}
-      showApp();
+
+    if (session?.user) {
+      if (booted) return; // already running, ignore duplicate events
+      booted = true;
+      USER = session.user;
+
+      // Step 1: Load from local cache instantly → show app with no delay
+      const hasCache = loadCache(USER.id);
+      showApp(); // renders immediately (empty or from cache)
+
+      // Step 2: Sync from Supabase in background — no spinner, no wait
+      try {
+        await loadAllData(USER.id);
+        renderTab(); // silently refresh UI with latest server data
+      } catch (e) {
+        console.warn('Background sync failed, showing cached data', e);
+      }
+
     } else {
-      document.getElementById('loading-screen').style.display='none';
-      document.getElementById('main-app').style.display='none';
-      document.getElementById('bottom-nav').style.display='none';
-      document.getElementById('fab').style.display='none';
-      document.getElementById('auth-screen').style.display='flex';
+      if (booted && USER) {
+        // Explicit sign-out
+        booted = false; USER = null; txns = []; startBals = {};
+        document.getElementById('main-app').style.display = 'none';
+        document.getElementById('bottom-nav').style.display = 'none';
+        document.getElementById('fab').style.display = 'none';
+        document.getElementById('auth-screen').style.display = 'flex';
+      } else if (!booted) {
+        booted = true;
+        document.getElementById('loading-screen').style.display = 'none';
+        document.getElementById('auth-screen').style.display = 'flex';
+      }
     }
   });
 }
