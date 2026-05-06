@@ -396,8 +396,8 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:'DM San
 
 <script>
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
-const SUPABASE_URL      = 'https://omlatcmjgwvpycksqkai.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9tbGF0Y21qZ3d2cHlja3Nxa2FpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgwMDIwNzksImV4cCI6MjA5MzU3ODA3OX0.xhfFN_OoflQWQpGORehWgYJGYPb5dgECUbeTQ_Mmsyg';
+const SUPABASE_URL      = 'YOUR_SUPABASE_URL';
+const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
 // ─────────────────────────────────────────────────────────────────────────────
 
 // SB client is initialised at boot (see bottom of script)
@@ -501,7 +501,9 @@ async function handleAuth(){
   }
 }
 async function signOut(){
-  await SB.auth.signOut();USER=null;txns=[];startBals={};
+  if(realtimeChannel){ SB.removeChannel(realtimeChannel); realtimeChannel=null; }
+  await SB.auth.signOut();
+  USER=null;txns=[];startBals={};
   document.getElementById('main-app').style.display='none';
   document.getElementById('bottom-nav').style.display='none';
   document.getElementById('fab').style.display='none';
@@ -572,6 +574,72 @@ function dbSaveBals(ym,bals){
     .catch(e=>console.warn('Supabase bal sync error:',e.message));
 }
 
+// ── Realtime sync ─────────────────────────────────────────────────────────────
+let realtimeChannel = null;
+
+function startRealtimeSync(){
+  if(realtimeChannel) SB.removeChannel(realtimeChannel);
+
+  realtimeChannel = SB
+    .channel('db-changes')
+    .on('postgres_changes',
+      {event:'*', schema:'public', table:'transactions', filter:'user_id=eq.'+USER.id},
+      (payload) => {
+        handleRealtimeTx(payload);
+      }
+    )
+    .on('postgres_changes',
+      {event:'*', schema:'public', table:'starting_balances', filter:'user_id=eq.'+USER.id},
+      (payload) => {
+        handleRealtimeBal(payload);
+      }
+    )
+    .subscribe((status)=>{
+      if(status==='SUBSCRIBED') console.log('Realtime connected ✓');
+    });
+}
+
+function handleRealtimeTx(payload){
+  const {eventType, new: row, old: oldRow} = payload;
+  // Skip if this change came from this same tab (already applied locally)
+  if(eventType==='INSERT'){
+    const exists = txns.some(t => t.id === row.id);
+    if(!exists){
+      txns.unshift({...row, amount:parseFloat(row.amount)});
+      saveCache(USER.id);
+      renderTab();
+    } else {
+      // Replace temp record (from this device) with real server record
+      const idx = txns.findIndex(t => t.id === row.id || t.id.startsWith('tmp-'));
+      if(idx>=0 && txns[idx].id !== row.id){
+        txns[idx] = {...row, amount:parseFloat(row.amount)};
+        saveCache(USER.id);
+      }
+    }
+  } else if(eventType==='DELETE'){
+    const before = txns.length;
+    txns = txns.filter(t => t.id !== oldRow.id);
+    if(txns.length !== before){ saveCache(USER.id); renderTab(); }
+  } else if(eventType==='UPDATE'){
+    const idx = txns.findIndex(t => t.id === row.id);
+    if(idx>=0){ txns[idx]={...row,amount:parseFloat(row.amount)}; saveCache(USER.id); renderTab(); }
+  }
+}
+
+function handleRealtimeBal(payload){
+  const {eventType, new: row} = payload;
+  if(eventType==='INSERT'||eventType==='UPDATE'){
+    if(!startBals[row.month]) startBals[row.month]={};
+    const current = startBals[row.month][row.payment];
+    const incoming = parseFloat(row.amount);
+    if(current !== incoming){
+      startBals[row.month][row.payment] = incoming;
+      saveCache(USER.id);
+      renderTab();
+    }
+  }
+}
+
 // ── UI ────────────────────────────────────────────────────────────────────────
 function showApp(){
   document.getElementById('loading-screen').style.display='none';
@@ -580,6 +648,7 @@ function showApp(){
   document.getElementById('bottom-nav').style.display='flex';
   document.getElementById('fab').style.display='flex';
   renderTab();
+  startRealtimeSync(); // subscribe to live changes from other devices
 }
 function switchTab(tab){
   activeTab=tab;
