@@ -564,7 +564,15 @@ async function loadAllData(uid){
   saveCache(uid);
 }
 async function dbAddTx(tx){
-  const {data,error}=await SB.from('transactions').insert({user_id:USER.id,...tx}).select().single();
+  async function dbAddTx(tx){
+  const {error} = await SB.from('transactions')
+    .insert({user_id:USER.id,...tx});
+  if(error) throw error;
+  // Add optimistically with a temp id instead of relying on returned data
+  txns.unshift({id:'tmp-'+Date.now(), user_id:USER.id, ...tx});
+  saveCache(USER.id);
+}
+
   if(error) throw error;
   txns.unshift({...data,amount:parseFloat(data.amount)});
   saveCache(USER.id);
