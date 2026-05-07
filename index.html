@@ -552,50 +552,35 @@ function loadCache(uid){
 
 // ── Data ──────────────────────────────────────────────────────────────────────
 async function loadAllData(uid){
-  const[{data:txData},{data:balData}]=await Promise.all([
+  const [txRes, balRes] = await Promise.all([
     SB.from('transactions').select('*').eq('user_id',uid).order('date',{ascending:false}),
     SB.from('starting_balances').select('*').eq('user_id',uid),
   ]);
-  if(txData){
-    txns=txData.map(r=>({...r,amount:parseFloat(r.amount)}));
-    startBals={};
-    (balData||[]).forEach(r=>{if(!startBals[r.month])startBals[r.month]={};startBals[r.month][r.payment]=parseFloat(r.amount)});
-    saveCache(uid);
-  }
+  if(txRes.error) throw txRes.error;
+  if(balRes.error) throw balRes.error;
+  txns=(txRes.data||[]).map(r=>({...r,amount:parseFloat(r.amount)}));
+  startBals={};
+  (balRes.data||[]).forEach(r=>{if(!startBals[r.month])startBals[r.month]={};startBals[r.month][r.payment]=parseFloat(r.amount)});
+  saveCache(uid);
 }
-function dbAddTx(tx){
-  // Add locally with a temp id — instant
-  const tempId='tmp-'+Date.now();
-  txns.unshift({...tx,id:tempId,user_id:USER.id,amount:parseFloat(tx.amount)});
+async function dbAddTx(tx){
+  const {data,error}=await SB.from('transactions').insert({user_id:USER.id,...tx}).select().single();
+  if(error) throw error;
+  txns.unshift({...data,amount:parseFloat(data.amount)});
   saveCache(USER.id);
-  // Fire-and-forget to Supabase, swap temp id with real one when done
-  SB.from('transactions').insert({user_id:USER.id,...tx}).select().single()
-    .then(({data,error})=>{
-      if(error){console.warn('Supabase tx sync failed:',error.message);return;}
-      const idx=txns.findIndex(t=>t.id===tempId);
-      if(idx>=0)txns[idx]={...data,amount:parseFloat(data.amount)};
-      saveCache(USER.id);
-    })
-    .catch(e=>console.warn('Supabase tx error:',e.message));
 }
-function dbDeleteTx(id){
-  // Remove locally — instant
+async function dbDeleteTx(id){
+  const {error}=await SB.from('transactions').delete().eq('id',id).eq('user_id',USER.id);
+  if(error) throw error;
   txns=txns.filter(t=>t.id!==id);
   saveCache(USER.id);
-  // Fire-and-forget to Supabase
-  SB.from('transactions').delete().eq('id',id).eq('user_id',USER.id)
-    .then(({error})=>{ if(error) console.warn('Supabase delete failed:',error.message); })
-    .catch(e=>console.warn('Supabase delete error:',e.message));
 }
-function dbSaveBals(ym,bals){
-  // Save locally & update state — instant, synchronous
+async function dbSaveBals(ym,bals){
+  const rows=Object.entries(bals).map(([payment,amount])=>({user_id:USER.id,month:ym,payment,amount}));
+  const {error}=await SB.from('starting_balances').upsert(rows,{onConflict:'user_id,month,payment'});
+  if(error) throw error;
   startBals[ym]=bals;
   saveCache(USER.id);
-  // Fire-and-forget to Supabase — never blocks the UI
-  const rows=Object.entries(bals).map(([payment,amount])=>({user_id:USER.id,month:ym,payment,amount}));
-  SB.from('starting_balances').upsert(rows,{onConflict:'user_id,month,payment'})
-    .then(({error})=>{ if(error) console.warn('Supabase bal sync failed:',error.message); })
-    .catch(e=>console.warn('Supabase bal sync error:',e.message));
 }
 
 // ── Realtime sync ─────────────────────────────────────────────────────────────
@@ -635,8 +620,10 @@ function startRealtimeSync(){
 async function refreshFromServerSilent(){
   if(!USER) return;
   try{
+    const beforeSig=JSON.stringify({txns,startBals});
     await loadAllData(USER.id);
-    renderTab();
+    const afterSig=JSON.stringify({txns,startBals});
+    if(beforeSig!==afterSig) renderTab();
   }catch(e){
     console.warn('Periodic sync failed:', e?.message||e);
   }
@@ -744,7 +731,11 @@ function renderTab(){
 }
 
 function changeMonth(dir,tab){
+  const prevSelDay=parseInt((selDate||'').slice(-2),10)||1;
   viewMonth=dir>0?nextMonth(viewMonth):prevMonth(viewMonth);
+  const [y,m]=viewMonth.split('-').map(Number);
+  const dim=new Date(y,m,0).getDate();
+  selDate=`${viewMonth}-${pad2(Math.min(prevSelDay,dim))}`;
   activeTab=tab;renderTab();
 }
 function monthNavHTML(tab){
@@ -867,18 +858,31 @@ function updateBalTotal(){
   let t=0;PAYMENTS.forEach(p=>{const el=document.getElementById('sb-'+p.id);if(el)t+=parseFloat(el.value)||0});
   const el=document.getElementById('bal-total-preview');if(el)el.textContent=fmtUZS(t);
 }
-function saveBalances(){
+async function saveBalances(){
   const bals={};
   PAYMENTS.forEach(p=>{const el=document.getElementById('sb-'+p.id);bals[p.id]=parseFloat(el?el.value:0)||0});
-  dbSaveBals(viewMonth,bals); // instant — no await needed
-  renderTab();
-  showToast('✓ Balances saved');
+  const btn=document.getElementById('save-bal-btn');
+  if(btn){btn.disabled=true;btn.textContent='Saving...';}
+  try{
+    await dbSaveBals(viewMonth,bals);
+    renderTab();
+    showToast('✓ Balances saved');
+  }catch(e){
+    console.warn('Save balances failed:',e?.message||e);
+    showToast('Could not save balances. Check connection/auth.');
+  }finally{
+    if(btn){btn.disabled=false;btn.textContent='Save Balances';}
+  }
 }
 
 // ── Calendar ──────────────────────────────────────────────────────────────────
 function renderCalendar(){
   const[y,m]=viewMonth.split('-').map(Number);
   const firstDow=new Date(y,m-1,1).getDay(),daysInMonth=new Date(y,m,0).getDate(),today=todayStr();
+  if(!selDate||!selDate.startsWith(viewMonth+'-')){
+    const todayDay=today.startsWith(viewMonth+'-')?parseInt(today.slice(-2),10):1;
+    selDate=`${viewMonth}-${pad2(Math.min(todayDay,daysInMonth))}`;
+  }
   const byDay={};
   txnsForMonth(viewMonth).forEach(t=>{
     if(!byDay[t.date])byDay[t.date]={inc:0,exp:0};
@@ -924,7 +928,13 @@ function renderCalendar(){
     <div style="height:8px"></div>
   </div>`;
 }
-function selectDay(ds){selDate=ds;if(viewMonth!==ds.slice(0,7))viewMonth=ds.slice(0,7);renderTab()}
+function selectDay(ds){
+  selDate=ds;
+  const targetMonth=ds.slice(0,7);
+  if(viewMonth!==targetMonth)viewMonth=targetMonth;
+  if(activeTab!=='calendar')activeTab='calendar';
+  renderTab();
+}
 
 // ── History ───────────────────────────────────────────────────────────────────
 function renderHistory(){
@@ -1228,10 +1238,15 @@ function txItemHTML(t,hideDate){
     <button class="tx-delete" onclick="deleteTx('${t.id}')">×</button>
   </div>`;
 }
-function deleteTx(id){
+async function deleteTx(id){
   if(!confirm('Delete this transaction?'))return;
-  dbDeleteTx(id); // instant
-  renderTab();
+  try{
+    await dbDeleteTx(id);
+    renderTab();
+  }catch(e){
+    console.warn('Delete transaction failed:',e?.message||e);
+    showToast('Could not delete transaction. Check connection/auth.');
+  }
 }
 
 // ── Modal ─────────────────────────────────────────────────────────────────────
@@ -1261,14 +1276,27 @@ function renderPayGrid(){
     </button>`).join('');
 }
 function setPayment(id){modalPayment=id;renderPayGrid()}
-function saveTx(){
+async function saveTx(){
   const amount=parseFloat(document.getElementById('inp-amount').value);
   const date=document.getElementById('inp-date').value;
   const category=document.getElementById('inp-cat').value;
   const note=document.getElementById('inp-note').value.trim();
   if(!amount||amount<=0||!date){showToast('⚠️ Enter a valid amount');return}
-  dbAddTx({type:modalType,amount,date,category,payment:modalPayment,note}); // instant
-  closeModal();selDate=date;renderTab();showToast('✓ Transaction saved');
+  const btn=document.getElementById('modal-submit');
+  if(btn){btn.disabled=true;btn.textContent='Saving...';}
+  try{
+    await dbAddTx({type:modalType,amount,date,category,payment:modalPayment,note});
+    closeModal();
+    selDate=date;
+    if(viewMonth!==date.slice(0,7))viewMonth=date.slice(0,7);
+    renderTab();
+    showToast('✓ Transaction saved');
+  }catch(e){
+    console.warn('Save transaction failed:',e?.message||e);
+    showToast('Could not save transaction. Check connection/auth.');
+  }finally{
+    if(btn){btn.disabled=false;btn.textContent='Save Transaction';}
+  }
 }
 document.getElementById('modal-backdrop').addEventListener('click',function(e){if(e.target===this)closeModal()});
 
