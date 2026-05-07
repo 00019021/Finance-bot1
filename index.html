@@ -1301,7 +1301,7 @@ async function saveTx(){
     showToast('✓ Transaction saved');
   }catch(e){
     console.warn('Save transaction failed:',e?.message||e);
-    alert('Error: ' + JSON.stringify(e));
+    alert('Error: ' + e?.message + ' | code: ' + e?.code + ' | details: ' + e?.details + ' | hint: ' + e?.hint);
     showToast('Could not save transaction. Check connection/auth.');
   }finally{
     if(btn){btn.disabled=false;btn.textContent='Save Transaction';}
